@@ -2,7 +2,7 @@
 
 Fix rough document photos and scans entirely in your browser: a small multi-head CNN
 diagnoses blur, contrast loss, noise and skew from a thumbnail; ScanMend then applies
-targeted corrections (deskew rotation, unsharp-mask sharpening, contrast boost, optional manual denoise), shows a
+targeted corrections (model-driven unsharp-mask sharpening and contrast boost, plus manual deskew and optional manual denoise), shows a
 before/after comparison, OCRs the result, and exports a **searchable PDF** (corrected
 image + invisible text layer).
 
@@ -17,13 +17,13 @@ Everything runs client-side. Your document never leaves the browser.
 
 ## What the model actually does
 
-- Input: 160x160 grayscale letterboxed thumbnail of the document.
+- Input: 160x160 grayscale thumbnail of the document (direct squash resize, no letterbox - matches synthesize.py).
 - Architecture: 4 conv blocks (24/48/96/128 filters) -> GAP -> dense 96 -> two heads:
   `pos` = [blur, contrast_loss, noise] severities in [0,1]; `skew` = tanh, x8 = degrees.
 - Training data: 4,800 synthetic documents (96 fonts, held-out fonts/layouts for eval)
   degraded with known parameters (`train/synthesize.py`), 4,200 train / 600 eval.
 - Trained with `train/train_model.py` (chunked CPU training), exported with
-  `train/export_tfjs.py` to `app/model/`.
+  `train/export_tfjs_graph.py` + `train/patch_graph_tanh.py` to `app/model/` (tfjs 4.22 is run on the CPU backend - WebGL returns input-independent output for this graph; CPU matches the Python model exactly).
 
 ## Honest evaluation (600 held-out synthetic images, held-out fonts)
 
@@ -43,7 +43,7 @@ is documented in `train/synthesize.py` plans but not yet trained.
 Evaluated on synthetic data only; real phone photos may differ. Corrections are tuned
 on synthetic degradations; on real photos the sharpen/contrast controls are visibility
 aids, not verified restorations. OCR quality depends on the source image;
-low-confidence words are reported in the UI.
+low-confidence words are reported in the UI. Skew estimation failed validation on real photos (wrong sign), so deskew is manual-only; the estimate is shown for reference.
 
 ## OCR recovery evaluation (40 fresh documents, unseen document fonts, known ground-truth text)
 
@@ -69,6 +69,11 @@ model-driven rather than a fixed recipe.
 - CDN dependency: the app is not guaranteed to work offline; cold load needs network.
 - Corrections are parameterized filters, not learned restoration - ScanMend will not
   hallucinate missing text. OCR errors are shown, not hidden.
+- When fewer than 50% of OCR words are usable, the app flags the result as too low
+  quality for reliable text search before export: the PDF keeps the full image, the
+  text layer is labeled as possibly inaccurate, and retaining omitted words is an
+  explicit opt-in marked "search accuracy not guaranteed". Words whose boxes fall
+  outside the page are always omitted.
 
 ## AI assistance disclosure
 
