@@ -123,7 +123,8 @@ let ocrWords = null, ocrText = null;
 
 async function boot() {
   try {
-    model = await tf.loadGraphModel('model/model.json');  // tfjs graph model: Keras 3 layers JSON is not tfjs-compatible
+    // tfjs graph model (Keras 3 layers JSON is not tfjs-compatible); ?v= busts Pages/browser cache on model updates
+    model = await tf.loadGraphModel('model/model.json?v=2');
     status('Ready. Load a document image to start.');
   } catch (e) {
     status('Model failed to load: ' + e.message);
