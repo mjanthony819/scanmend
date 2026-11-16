@@ -93,8 +93,10 @@
     <h2>4. Text layer (OCR)</h2>
     <div class="row">
       <button id="ocrBtn">Run OCR on corrected image</button>
+      <button id="ocrOrigBtn">Run OCR on original</button>
       <span id="ocrStatus" style="color:var(--dim);font-size:12px"></span>
     </div>
+    <div id="ocrCmp" style="color:var(--dim);font-size:12px;margin-top:6px"></div>
     <div id="ocrOut" class="hidden" style="margin-top:10px"></div>
   </section>
 
@@ -222,10 +224,13 @@ function resetSliders() {
   // skew estimate is NOT auto-applied: it failed validation on a real-style photo (estimated -2.7 deg
   // for +1.8 deg actual). It is shown in the diagnosis card; deskew stays manual until validated.
   $('sSkew').value = 0;
-  $('sBlur').value = window._est.blur;
+  // auto-sharpen capped at 0.35: stronger auto sharpening measurably hurt OCR on a real-style photo.
+  // Estimate shown in the diagnosis card; raise the slider manually if wanted.
+  $('sBlur').value = Math.min(window._est.blur, 0.35);
   $('sCon').value = window._est.con;
   $('sNoi').value = 0;  // noise head is near-chance on thumbnails: never auto-apply denoise
   syncSliderLabels();
+  $('sBlurV').textContent = (+$('sBlur').value).toFixed(2) + (window._est.blur > 0.35 ? ' (capped from ' + window._est.blur.toFixed(2) + ')' : '');
 }
 function syncSliderLabels() {
   $('sSkewV').textContent = (+$('sSkew').value).toFixed(1) + '°';
@@ -275,7 +280,7 @@ function applyCorrections() {
   for (let i = 0; i < n; i++) { const v = g[i]; d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
   a.width = rot.width; a.height = rot.height;
   a.getContext('2d').putImageData(im, 0, 0);
-  ocrWords = ocrText = null; $('pdfBtn').disabled = true;
+  ocrWords = ocrText = null; ocrRuns = {}; $('pdfBtn').disabled = true; $('ocrCmp').textContent = '';
   if (!$('ocrCard').classList.contains('hidden')) $('ocrStatus').textContent = 'Corrections changed - re-run OCR before exporting.';
 }
 
@@ -291,38 +296,76 @@ function applyCorrections() {
 })();
 
 // ---------- OCR ----------
-$('ocrBtn').onclick = async () => {
-  $('ocrStatus').textContent = 'OCR starting (first run downloads the eng model, ~10-30s)...';
-  try {
-    const res = await Tesseract.recognize($('afterCv'), 'eng', { logger: m => {
-      if (m.status === 'recognizing text') $('ocrStatus').textContent = 'OCR ' + Math.round(m.progress * 100) + '%';
-    }});
-    ocrText = res.data.text.trim();
-    // tesseract.js v5 nests words under blocks>paragraphs>lines; v4 exposed data.words. Handle both.
-    let raw = res.data.words;
-    if (!raw) { raw = []; (res.data.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => (l.words || []).forEach(w => raw.push(w))))); }
-    ocrWords = raw.map(w => ({ text: w.text, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, conf: w.confidence }));
-    const low = ocrWords.filter(w => w.conf < 60).length;
-    $('ocrOut').textContent = ocrText || '(no text found)';
-    $('ocrOut').classList.remove('hidden');
-    $('pdfCard').classList.remove('hidden');
-    $('ocrStatus').textContent = 'OCR done: ' + ocrWords.length + ' words, ' + low + ' low-confidence. Check the text before exporting.';
-    $('pdfBtn').disabled = !ocrWords.length;
-  } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; }
-};
+// Evidence-based source choice: OCR can run on the corrected image or the original.
+// Both runs are compared; the export defaults to whichever has higher mean word confidence.
+let ocrRuns = {}, ocrSource = 'corrected';
+async function runOCR(which) {
+  const cv = which === 'original' ? $('beforeCv') : $('afterCv');
+  $('ocrStatus').textContent = 'OCR on ' + which + ' starting (first run downloads the eng model, ~10-30s)...';
+  const res = await Tesseract.recognize(cv, 'eng', { logger: m => {
+    if (m.status === 'recognizing text') $('ocrStatus').textContent = 'OCR on ' + which + ' ' + Math.round(m.progress * 100) + '%';
+  }});
+  const text = res.data.text.trim();
+  // tesseract.js v5 nests words under blocks>paragraphs>lines; v4 exposed data.words. Handle both.
+  let raw = res.data.words;
+  if (!raw) { raw = []; (res.data.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => (l.words || []).forEach(w => raw.push(w))))); }
+  const words = raw.map(w => ({ text: w.text, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, conf: w.confidence }));
+  const meanConf = words.length ? words.reduce((s, w) => s + w.conf, 0) / words.length : 0;
+  ocrRuns[which] = { words, text, meanConf };
+  // pick the better-evidence source as the export default
+  const other = which === 'original' ? 'corrected' : 'original';
+  if (!ocrRuns[other] || meanConf >= ocrRuns[other].meanConf) ocrSource = which;
+  syncOCRChoice();
+  return ocrRuns[which];
+}
+function syncOCRChoice() {
+  const r = ocrRuns[ocrSource];
+  ocrWords = r ? r.words : null; ocrText = r ? r.text : null;
+  $('ocrOut').textContent = ocrText || '(no text found)';
+  $('ocrOut').classList.remove('hidden');
+  $('pdfCard').classList.remove('hidden');
+  $('pdfBtn').disabled = !ocrWords || !ocrWords.length;
+  const c = ocrRuns.corrected, o = ocrRuns.original;
+  let cmp = '';
+  if (c) cmp += 'corrected: ' + c.words.length + ' words, mean conf ' + c.meanConf.toFixed(0) + '%  |  ';
+  if (o) cmp += 'original: ' + o.words.length + ' words, mean conf ' + o.meanConf.toFixed(0) + '%  |  ';
+  cmp += 'exporting: ' + ocrSource + (c && o ? ' (higher mean confidence; run the other to compare)' : '');
+  $('ocrCmp').textContent = cmp;
+  $('ocrStatus').textContent = r ? 'OCR on ' + ocrSource + ': ' + r.words.length + ' words, ' + r.words.filter(w => w.conf < 60).length + ' low-confidence. Check the text before exporting.' : '';
+}
+$('ocrBtn').onclick = async () => { try { await runOCR('corrected'); } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; } };
+$('ocrOrigBtn').onclick = async () => { try { await runOCR('original'); } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; } };
 
 // ---------- PDF export ----------
+// Reading-order sort: cluster words into lines by y-center, lines top-down, words left-right.
+function readingOrder(words) {
+  const hs = words.map(w => w.y1 - w.y0).sort((a, b) => a - b);
+  const medH = hs.length ? hs[Math.floor(hs.length / 2)] : 10;
+  const tol = medH * 0.6;
+  const lines = [];
+  for (const w of [...words].sort((a, b) => (a.y0 + a.y1) - (b.y0 + b.y1))) {
+    const cy = (w.y0 + w.y1) / 2;
+    const line = lines.find(L => Math.abs(L.cy - cy) <= tol);
+    if (line) { line.words.push(w); line.cy = (line.cy * (line.words.length - 1) + cy) / line.words.length; }
+    else lines.push({ cy, words: [w] });
+  }
+  lines.sort((a, b) => a.cy - b.cy);
+  lines.forEach(L => L.words.sort((a, b) => a.x0 - b.x0));
+  return lines.flatMap(L => L.words);
+}
 $('pdfBtn').onclick = () => {
-  const a = $('afterCv');
+  const a = ocrSource === 'original' ? $('beforeCv') : $('afterCv');
   const pdf = new jspdf.jsPDF({ unit: 'pt', format: [a.width * 0.5, a.height * 0.5] });
   const pw = a.width * 0.5, ph = a.height * 0.5;
   pdf.addImage(a.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, ph);
-  // invisible text layer at word positions (searchable/selectable).
-  // baseline:'top' + per-word font size so the invisible box overlays the visible word
-  // (fixed size + baseline-at-bottom sat ~one line above the words - verified with pdftotext -bbox overlay).
-  let placed = 0, invisibleOK = true;
-  for (const w of ocrWords) {
-    if (!w.text) continue;
+  // invisible text layer at word positions (searchable/selectable), in reading order.
+  // baseline:'top' + per-word font size so the invisible box overlays the visible word.
+  // Skip out-of-page boxes and very-low-confidence background fragments; skips are counted and shown, never silent.
+  let placed = 0, skippedConf = 0, skippedBounds = 0, invisibleOK = true;
+  for (const w of readingOrder(ocrWords)) {
+    if (!w.text || !w.text.trim()) continue;
+    if (w.x0 < 0 || w.y0 < 0 || w.x1 > a.width || w.y1 > a.height) { skippedBounds++; continue; }
+    if (w.conf < 50) { skippedConf++; continue; }
     const x = w.x0 * 0.5, y = w.y0 * 0.5;
     const fs = Math.max(4, (w.y1 - w.y0) * 0.5 * 0.95);
     try {
@@ -337,8 +380,11 @@ $('pdfBtn').onclick = () => {
     pdf.addPage([pw, ph]); pdf.setFontSize(10);
     pdf.text(pdf.splitTextToSize('OCR text (invisible layer unsupported in this jsPDF build - text appended instead):\n\n' + ocrText, pw - 40), 20, 30);
   }
-  pdf.setProperties({ title: 'ScanMend corrected document', subject: 'Corrected scan with OCR text layer' });
-  pdf.save('scanmend-corrected.pdf');
+  pdf.setProperties({ title: 'ScanMend ' + ocrSource + ' document', subject: 'Scan with OCR text layer' });
+  pdf.save('scanmend-' + ocrSource + '.pdf');
+  $('ocrStatus').textContent = 'Exported ' + placed + ' of ' + ocrWords.length + ' OCR words' +
+    (skippedConf ? ' (' + skippedConf + ' low-confidence fragments skipped)' : '') +
+    (skippedBounds ? ' (' + skippedBounds + ' out-of-page boxes skipped)' : '') + '. Source: ' + ocrSource + '.';
 };
 </script>
 </body>
