@@ -317,15 +317,18 @@ $('pdfBtn').onclick = () => {
   const pdf = new jspdf.jsPDF({ unit: 'pt', format: [a.width * 0.5, a.height * 0.5] });
   const pw = a.width * 0.5, ph = a.height * 0.5;
   pdf.addImage(a.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, ph);
-  // invisible text layer at word positions (searchable/selectable)
-  pdf.setFontSize(8);
+  // invisible text layer at word positions (searchable/selectable).
+  // baseline:'top' + per-word font size so the invisible box overlays the visible word
+  // (fixed size + baseline-at-bottom sat ~one line above the words - verified with pdftotext -bbox overlay).
   let placed = 0, invisibleOK = true;
   for (const w of ocrWords) {
     if (!w.text) continue;
-    const x = w.x0 * 0.5, y = w.y1 * 0.5;
+    const x = w.x0 * 0.5, y = w.y0 * 0.5;
+    const fs = Math.max(4, (w.y1 - w.y0) * 0.5 * 0.95);
     try {
-      if (invisibleOK) pdf.text(w.text, x, y, { renderingMode: 'invisible' });
-      else pdf.text(w.text, x, y);
+      pdf.setFontSize(fs);
+      if (invisibleOK) pdf.text(w.text, x, y, { renderingMode: 'invisible', baseline: 'top' });
+      else pdf.text(w.text, x, y, { baseline: 'top' });
       placed++;
     } catch (e) { invisibleOK = false; }
   }
