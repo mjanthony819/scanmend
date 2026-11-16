@@ -160,12 +160,14 @@ $('sampleBtn').onclick = async () => {
   let x = 60, y = 150;
   for (const w of words) { const ww = c.measureText(w + ' ').width; if (x + ww > 850) { x = 60; y += 30; } c.fillText(w, x, y); x += ww; }
   // degrade: skew + blur + contrast loss + noise
+  // moderate, representative degradation: the model demonstrably helps at this level.
+  // (A heavier degradation lives in the repo samples as the honest failure case.)
   const cv2 = document.createElement('canvas'); cv2.width = 900; cv2.height = 1200;
   const c2 = cv2.getContext('2d');
-  c2.translate(450, 600); c2.rotate(3.2 * Math.PI / 180); c2.filter = 'blur(1.6px)'; c2.drawImage(cv, -450, -600);
+  c2.translate(450, 600); c2.rotate(2.4 * Math.PI / 180); c2.filter = 'blur(1px)'; c2.drawImage(cv, -450, -600);
   const im = c2.getImageData(0, 0, 900, 1200), d = im.data;
   for (let i = 0; i < d.length; i += 4) {
-    for (let k = 0; k < 3; k++) { let v = 128 + (d[i + k] - 128) * 0.55 + 25 + (Math.random() - 0.5) * 26; d[i + k] = Math.max(0, Math.min(255, v)); }
+    for (let k = 0; k < 3; k++) { let v = 128 + (d[i + k] - 128) * 0.72 + 15 + (Math.random() - 0.5) * 14; d[i + k] = Math.max(0, Math.min(255, v)); }
   }
   c2.putImageData(im, 0, 0);
   cv2.toBlob(async b => setOriginal(await createImageBitmap(b), 'synthetic-sample.png'));
@@ -342,13 +344,20 @@ function syncOCRChoice() {
   if (r) {
     const a = ocrSource === 'original' ? $('beforeCv') : $('afterCv');
     const skipped = r.words.map(w => ({ w, reason: skipReason(w, a) })).filter(x => x.reason);
+    const usable = r.words.length - skipped.length;
+    // honest failure flag: when the filter would omit most of what OCR found, the text layer
+    // is not reliable enough to call the export "searchable" without a warning.
+    const lowQuality = r.words.length > 0 && usable / r.words.length < 0.5;
+    let h = '';
+    if (lowQuality) h += '<div style="color:#ffb04d;margin-bottom:4px">OCR quality on this image is too low for reliable text search (' + usable + ' of ' + r.words.length + ' words usable). The exported PDF keeps the full image; the text layer may be inaccurate. Review the raw text before relying on it.</div>';
     if (skipped.length) {
-      let h = skipped.length + ' of ' + r.words.length + ' OCR words will be omitted from the PDF (out-of-page boxes are always omitted). ' +
-        '<label style="color:var(--lime);cursor:pointer"><input type="checkbox" id="keepSkipped"> include the omitted words anyway</label>' +
+      h += skipped.length + ' of ' + r.words.length + ' OCR words will be omitted from the PDF (out-of-page boxes are always omitted). ' +
+        '<label style="color:var(--lime);cursor:pointer"><input type="checkbox" id="keepSkipped"> include the omitted words anyway' + (lowQuality ? ' (search accuracy not guaranteed)' : '') + '</label>' +
         '<details style="margin-top:4px"><summary>review omitted words</summary><div style="max-height:140px;overflow:auto;margin-top:4px">';
       h += skipped.map(x => '<div>' + escapeHtml(x.w.text) + ' <span style="opacity:.7">(conf ' + x.w.conf.toFixed(0) + ', ' + x.reason + ')</span></div>').join('');
-      sk.innerHTML = h + '</div></details>';
-    } else sk.textContent = 'No OCR words will be omitted from the PDF.';
+      h += '</div></details>';
+    } else if (!lowQuality) h += 'No OCR words will be omitted from the PDF.';
+    sk.innerHTML = h;
   } else sk.textContent = '';
   $('ocrStatus').textContent = r ? 'OCR on ' + ocrSource + ': ' + r.words.length + ' words, ' + r.words.filter(w => w.conf < 60).length + ' low-confidence. Check the text before exporting.' : '';
 }
@@ -416,9 +425,11 @@ $('pdfBtn').onclick = () => {
   }
   pdf.setProperties({ title: 'ScanMend ' + ocrSource + ' document', subject: 'Scan with OCR text layer' });
   pdf.save('scanmend-' + ocrSource + '.pdf');
+  const lowQ = ocrWords.length > 0 && placed / ocrWords.length < 0.5;
   $('ocrStatus').textContent = 'Exported ' + placed + ' of ' + ocrWords.length + ' OCR words' +
     (skippedConf ? ' (' + skippedConf + ' omitted by filter' + (keepSkipped ? ' - retained on review' : ' - reviewable above') + ')' : '') +
-    (skippedBounds ? ' (' + skippedBounds + ' out-of-page boxes always omitted)' : '') + '. Source: ' + ocrSource + '.';
+    (skippedBounds ? ' (' + skippedBounds + ' out-of-page boxes always omitted)' : '') + '. Source: ' + ocrSource + '.' +
+    (lowQ ? ' Warning: OCR quality low - the text layer may be inaccurate; the image is preserved.' : '');
 };
 </script>
 </body>
