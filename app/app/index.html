@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScanMend - fix rough document scans in your browser</title>
+<style>
+  :root { --bg:#14161a; --panel:#1c1f24; --line:#2b2f36; --fg:#e8eaed; --dim:#9aa0a8; --lime:#b6ff2e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:10px; }
+  header h1 { font-size:17px; margin:0; letter-spacing:.3px; }
+  header h1 b { color:var(--lime); font-weight:700; }
+  header span { color:var(--dim); font-size:12px; }
+  main { max-width:1060px; margin:0 auto; padding:16px; display:grid; gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); }
+  button { background:var(--lime); color:#14161a; border:0; border-radius:8px; padding:9px 14px; font-weight:600; cursor:pointer; font-size:13px; }
+  button.sec { background:#262a31; color:var(--fg); border:1px solid var(--line); }
+  button:disabled { opacity:.4; cursor:default; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .diag { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .metric { background:#14161a; border:1px solid var(--line); border-radius:8px; padding:10px; }
+  .metric .k { color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:.5px; }
+  .metric .v { font-size:18px; font-weight:700; color:var(--lime); margin-top:2px; }
+  .metric .bar { height:4px; background:#262a31; border-radius:2px; margin-top:6px; overflow:hidden; }
+  .metric .bar i { display:block; height:100%; background:var(--lime); }
+  .metric small { color:var(--dim); font-size:10px; }
+  .sliders { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .sliders label { font-size:12px; color:var(--dim); display:block; margin-bottom:4px; }
+  input[type=range] { width:100%; accent-color:var(--lime); }
+  .view { position:relative; width:100%; overflow:hidden; border-radius:8px; border:1px solid var(--line); background:#0d0f12; }
+  .view canvas { display:block; width:100%; height:auto; }
+  #afterWrap { position:absolute; inset:0; clip-path:inset(0 0 0 50%); }
+  #splitLine { position:absolute; top:0; bottom:0; left:50%; width:2px; background:var(--lime); cursor:ew-resize; }
+  #splitLine::after { content:'< >'; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:var(--lime); color:#14161a; font-size:10px; font-weight:700; padding:3px 5px; border-radius:6px; }
+  #status { color:var(--dim); font-size:12px; min-height:16px; }
+  #ocrOut { white-space:pre-wrap; background:#14161a; border:1px solid var(--line); border-radius:8px; padding:10px; max-height:180px; overflow:auto; font-size:12px; color:var(--dim); }
+  .hidden { display:none; }
+  footer { color:var(--dim); font-size:11px; padding:10px 18px 24px; max-width:1060px; margin:0 auto; }
+  footer a { color:var(--lime); }
+  #drop { border:1.5px dashed var(--line); border-radius:8px; padding:26px; text-align:center; color:var(--dim); cursor:pointer; }
+  #drop:hover { border-color:var(--lime); color:var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Scan<b>Mend</b></h1>
+  <span>rough scan &rarr; diagnosed &rarr; corrected &rarr; searchable PDF. 100% client-side: your document never leaves this browser.</span>
+</header>
+<main>
+  <section class="card">
+    <h2>1. Load a document photo or scan</h2>
+    <div class="row">
+      <div id="drop" style="flex:1">Drop an image here, or click to choose (JPG/PNG)</div>
+      <input type="file" id="file" accept="image/*" class="hidden">
+      <button class="sec" id="sampleBtn">Try a synthetic sample</button>
+    </div>
+    <div id="status">Libraries loading...</div>
+  </section>
+
+  <section class="card hidden" id="diagCard">
+    <h2>2. Diagnosis (on-device CNN, 160&times;160 thumbnail)</h2>
+    <div class="diag">
+      <div class="metric"><div class="k">Blur</div><div class="v" id="vBlur">-</div><div class="bar"><i id="bBlur"></i></div><small>0 = sharp</small></div>
+      <div class="metric"><div class="k">Contrast loss</div><div class="v" id="vCon">-</div><div class="bar"><i id="bCon"></i></div><small>0 = full contrast</small></div>
+      <div class="metric"><div class="k">Noise</div><div class="v" id="vNoi">-</div><div class="bar"><i id="bNoi"></i></div><small>estimate unreliable on small thumbnails; adjust manually</small></div>
+      <div class="metric"><div class="k">Skew</div><div class="v" id="vSkew">-</div><div class="bar"><i id="bSkew"></i></div><small>degrees, + = clockwise</small></div>
+    </div>
+  </section>
+
+  <section class="card hidden" id="fixCard">
+    <h2>3. Correction (model-chosen settings, adjust freely)</h2>
+    <div class="sliders">
+      <div><label>Deskew (rotate) <span id="sSkewV"></span></label><input type="range" id="sSkew" min="-8" max="8" step="0.1"></div>
+      <div><label>Sharpen (unsharp mask) <span id="sBlurV"></span></label><input type="range" id="sBlur" min="0" max="1" step="0.01"></div>
+      <div><label>Contrast boost <span id="sConV"></span></label><input type="range" id="sCon" min="0" max="1" step="0.01"></div>
+      <div><label>Denoise (manual - estimate unreliable) <span id="sNoiV"></span></label><input type="range" id="sNoi" min="0" max="1" step="0.01"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="applyBtn">Re-apply corrections</button>
+      <button class="sec" id="resetBtn">Reset to model estimate</button>
+      <span style="color:var(--dim);font-size:12px">Original stays untouched; corrections render on a copy. Drag the lime line to compare.</span>
+    </div>
+    <div class="view" id="view" style="margin-top:10px">
+      <canvas id="beforeCv"></canvas>
+      <div id="afterWrap"><canvas id="afterCv"></canvas></div>
+      <div id="splitLine"></div>
+    </div>
+  </section>
+
+  <section class="card hidden" id="ocrCard">
+    <h2>4. Text layer (OCR)</h2>
+    <div class="row">
+      <button id="ocrBtn">Run OCR on corrected image</button>
+      <span id="ocrStatus" style="color:var(--dim);font-size:12px"></span>
+    </div>
+    <div id="ocrOut" class="hidden" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card hidden" id="pdfCard">
+    <h2>5. Export</h2>
+    <div class="row">
+      <button id="pdfBtn" disabled>Download searchable PDF</button>
+      <span style="color:var(--dim);font-size:12px">Corrected image + invisible OCR text layer. Searchable/selectable in any PDF reader. This is a searchable PDF, not a tagged accessible PDF.</span>
+    </div>
+  </section>
+</main>
+<footer>
+  ScanMend - Kane CLI Online Hackathon entry. Model: custom multi-head CNN (blur / contrast-loss / noise / skew), trained on synthetic degraded documents, runs in-browser via TensorFlow.js (Apache-2.0). OCR: Tesseract.js (Apache-2.0). PDF: jsPDF (MIT). All libraries loaded from CDN; first load needs a connection. Known limits: noise estimation is weak on downscaled thumbnails (see README eval), OCR quality depends on the source image, exported PDF is searchable but not accessibility-tagged.
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
+<script>
+'use strict';
+const $ = id => document.getElementById(id);
+const status = m => { $('status').textContent = m; };
+
+let model = null, orig = null; // orig: ImageBitmap of the untouched original
+let ocrWords = null, ocrText = null;
+
+async function boot() {
+  try {
+    model = await tf.loadLayersModel('model/model.json');
+    status('Ready. Load a document image to start.');
+  } catch (e) {
+    status('Model failed to load: ' + e.message);
+  }
+}
+boot();
+
+// ---------- loading ----------
+$('drop').onclick = () => $('file').click();
+$('drop').ondragover = e => { e.preventDefault(); };
+$('drop').ondrop = e => { e.preventDefault(); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); };
+$('file').onchange = e => { if (e.target.files[0]) loadFile(e.target.files[0]); };
+
+async function loadFile(f) {
+  const bmp = await createImageBitmap(f);
+  setOriginal(bmp, f.name);
+}
+
+$('sampleBtn').onclick = async () => {
+  status('Generating synthetic sample...');
+  const cv = document.createElement('canvas'); cv.width = 900; cv.height = 1200;
+  const c = cv.getContext('2d');
+  c.fillStyle = '#f5f2ea'; c.fillRect(0, 0, 900, 1200);
+  c.fillStyle = '#111'; c.font = '700 34px Georgia'; c.fillText('Field report: bridge inspection', 60, 90);
+  c.font = '17px Georgia';
+  const words = 'The eastern span shows moderate surface wear along the third joint. Drainage channels require clearing before the monsoon season. Load sensors recorded normal variance overnight. Maintenance crew recommends a follow-up inspection within ninety days.'.split(' ');
+  let x = 60, y = 150;
+  for (const w of words) { const ww = c.measureText(w + ' ').width; if (x + ww > 850) { x = 60; y += 30; } c.fillText(w, x, y); x += ww; }
+  // degrade: skew + blur + contrast loss + noise
+  const cv2 = document.createElement('canvas'); cv2.width = 900; cv2.height = 1200;
+  const c2 = cv2.getContext('2d');
+  c2.translate(450, 600); c2.rotate(3.2 * Math.PI / 180); c2.filter = 'blur(1.6px)'; c2.drawImage(cv, -450, -600);
+  const im = c2.getImageData(0, 0, 900, 1200), d = im.data;
+  for (let i = 0; i < d.length; i += 4) {
+    for (let k = 0; k < 3; k++) { let v = 128 + (d[i + k] - 128) * 0.55 + 25 + (Math.random() - 0.5) * 26; d[i + k] = Math.max(0, Math.min(255, v)); }
+  }
+  c2.putImageData(im, 0, 0);
+  cv2.toBlob(async b => setOriginal(await createImageBitmap(b), 'synthetic-sample.png'));
+};
+
+async function setOriginal(bmp, name) {
+  orig = bmp;
+  ['diagCard', 'fixCard', 'ocrCard'].forEach(id => $(id).classList.remove('hidden'));
+  $('ocrOut').classList.add('hidden'); ocrWords = ocrText = null; $('pdfBtn').disabled = true;
+  status('Loaded ' + name + ' (' + bmp.width + 'x' + bmp.height + '). Running diagnosis...');
+  drawBefore();
+  await diagnose();
+  resetSliders();
+  applyCorrections();
+}
+
+// ---------- diagnosis ----------
+async function diagnose() {
+  const thumb = document.createElement('canvas'); thumb.width = 160; thumb.height = 160;
+  const c = thumb.getContext('2d');
+  // letterbox to square, grayscale, /255 - matches training preprocessing
+  const s = Math.min(160 / orig.width, 160 / orig.height);
+  const w = Math.round(orig.width * s), h = Math.round(orig.height * s);
+  c.fillStyle = '#fff'; c.fillRect(0, 0, 160, 160);
+  c.drawImage(orig, (160 - w) / 2, (160 - h) / 2, w, h);
+  const im = c.getImageData(0, 0, 160, 160), d = im.data;
+  const t = tf.tidy(() => {
+    const arr = new Float32Array(160 * 160);
+    for (let i = 0; i < 160 * 160; i++) arr[i] = (0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]) / 255;
+    return tf.tensor(arr, [1, 160, 160, 1]);
+  });
+  const out = model.predict(t);
+  // outputs: pos [blur, contrast_loss, noise] in 0..1, skew in -1..1 (*8 = degrees)
+  const arr = Array.isArray(out) ? out : Object.values(out);
+  const posT = arr.find(o => o.shape[o.shape.length - 1] === 3);
+  const skewT = arr.find(o => o.shape[o.shape.length - 1] === 1);
+  if (!posT || !skewT) { status('Unexpected model outputs: ' + arr.map(o => o.shape.join('x')).join(', ')); return; }
+  const pos = await posT.data(), skw = await skewT.data();
+  tf.dispose([t, out]);
+  window._est = { blur: pos[0], con: pos[1], noi: pos[2], skew: skw[0] * 8 };
+  $('vBlur').textContent = pos[0].toFixed(2); $('bBlur').style.width = (pos[0] * 100) + '%';
+  $('vCon').textContent = pos[1].toFixed(2); $('bCon').style.width = (pos[1] * 100) + '%';
+  $('vNoi').textContent = pos[2].toFixed(2) + ' ?'; $('bNoi').style.width = (pos[2] * 100) + '%';
+  $('vSkew').textContent = (skw[0] * 8).toFixed(1) + '°'; $('bSkew').style.width = (Math.abs(skw[0]) * 100) + '%';
+  status('Diagnosis done. Corrections applied with the model estimate.');
+}
+
+// ---------- rendering ----------
+const MAXDIM = 1600;
+function drawBefore() {
+  const s = Math.min(1, MAXDIM / Math.max(orig.width, orig.height));
+  const w = Math.round(orig.width * s), h = Math.round(orig.height * s);
+  const b = $('beforeCv'); b.width = w; b.height = h;
+  b.getContext('2d').drawImage(orig, 0, 0, w, h);
+  $('afterCv').width = w; $('afterCv').height = h;
+}
+
+function resetSliders() {
+  $('sSkew').value = -window._est.skew;  // rotate opposite of detected skew
+  $('sBlur').value = window._est.blur;
+  $('sCon').value = window._est.con;
+  $('sNoi').value = 0;  // noise head is near-chance on thumbnails: never auto-apply denoise
+  syncSliderLabels();
+}
+function syncSliderLabels() {
+  $('sSkewV').textContent = (+$('sSkew').value).toFixed(1) + '°';
+  $('sBlurV').textContent = (+$('sBlur').value).toFixed(2);
+  $('sConV').textContent = (+$('sCon').value).toFixed(2);
+  $('sNoiV').textContent = (+$('sNoi').value).toFixed(2);
+}
+['sSkew', 'sBlur', 'sCon', 'sNoi'].forEach(id => $(id).oninput = syncSliderLabels);
+$('resetBtn').onclick = () => { resetSliders(); applyCorrections(); };
+$('applyBtn').onclick = applyCorrections;
+
+function boxBlur(src, w, h, r) { // separable box blur on Uint8ClampedArray gray
+  const tmp = new Float32Array(src.length), out = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) { let acc = 0; const row = y * w;
+    for (let x = -r; x <= r; x++) acc += src[row + Math.min(w - 1, Math.max(0, x))];
+    for (let x = 0; x < w; x++) { tmp[row + x] = acc / (2 * r + 1);
+      acc += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)]; } }
+  for (let x = 0; x < w; x++) { let acc = 0;
+    for (let y = -r; y <= r; y++) acc += tmp[Math.min(h - 1, Math.max(0, y)) * w + x];
+    for (let y = 0; y < h; y++) { out[y * w + x] = acc / (2 * r + 1);
+      acc += tmp[Math.min(h - 1, y + r + 1) * w + x] - tmp[Math.max(0, y - r) * w + x]; } }
+  return out;
+}
+
+function applyCorrections() {
+  const skewDeg = +$('sSkew').value, deblur = +$('sBlur').value, conLoss = +$('sCon').value, denoise = +$('sNoi').value;
+  const b = $('beforeCv'), a = $('afterCv');
+  // 1. deskew (draw rotated)
+  const rot = document.createElement('canvas'); rot.width = b.width; rot.height = b.height;
+  const rc = rot.getContext('2d');
+  rc.fillStyle = '#fff'; rc.fillRect(0, 0, rot.width, rot.height);
+  rc.translate(rot.width / 2, rot.height / 2); rc.rotate(skewDeg * Math.PI / 180);
+  rc.drawImage(b, -b.width / 2, -b.height / 2);
+  const im = rc.getImageData(0, 0, rot.width, rot.height), d = im.data;
+  const n = rot.width * rot.height;
+  const g = new Float32Array(n);
+  for (let i = 0; i < n; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  // 2. denoise: blend toward blurred
+  if (denoise > 0.01) { const bl = boxBlur(g, rot.width, rot.height, 1); const k = Math.min(0.85, denoise);
+    for (let i = 0; i < n; i++) g[i] = g[i] * (1 - k) + bl[i] * k; }
+  // 3. sharpen: unsharp mask (visibility aid, not true deconvolution)
+  if (deblur > 0.01) { const bl = boxBlur(g, rot.width, rot.height, 2); const amt = deblur * 1.4;
+    for (let i = 0; i < n; i++) g[i] = Math.max(0, Math.min(255, g[i] + amt * (g[i] - bl[i]))); }
+  // 4. contrast boost: calibrated as the inverse of the synthetic degradation; on real photos it is a strong contrast stretch, not a verified restoration
+  if (conLoss > 0.01) { const cst = Math.max(0.15, 1 - conLoss);
+    for (let i = 0; i < n; i++) g[i] = Math.max(0, Math.min(255, (g[i] - 128 - (1 - cst) * 60) / cst + 128)); }
+  for (let i = 0; i < n; i++) { const v = g[i]; d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
+  a.width = rot.width; a.height = rot.height;
+  a.getContext('2d').putImageData(im, 0, 0);
+  ocrWords = ocrText = null; $('pdfBtn').disabled = true;
+  if (!$('ocrCard').classList.contains('hidden')) $('ocrStatus').textContent = 'Corrections changed - re-run OCR before exporting.';
+}
+
+// before/after split drag
+(() => { const line = $('splitLine'), view = $('view'), wrap = $('afterWrap');
+  let drag = false;
+  const move = e => { const r = view.getBoundingClientRect(); const x = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    const pct = Math.max(0, Math.min(100, x / r.width * 100));
+    line.style.left = pct + '%'; wrap.style.clipPath = 'inset(0 0 0 ' + pct + '%)'; };
+  line.onmousedown = () => drag = true; window.onmouseup = () => drag = false;
+  window.onmousemove = e => { if (drag) move(e); };
+  view.onclick = move;
+})();
+
+// ---------- OCR ----------
+$('ocrBtn').onclick = async () => {
+  $('ocrStatus').textContent = 'OCR starting (first run downloads the eng model, ~10-30s)...';
+  try {
+    const res = await Tesseract.recognize($('afterCv'), 'eng', { logger: m => {
+      if (m.status === 'recognizing text') $('ocrStatus').textContent = 'OCR ' + Math.round(m.progress * 100) + '%';
+    }});
+    ocrText = res.data.text.trim();
+    // tesseract.js v5 nests words under blocks>paragraphs>lines; v4 exposed data.words. Handle both.
+    let raw = res.data.words;
+    if (!raw) { raw = []; (res.data.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => (l.words || []).forEach(w => raw.push(w))))); }
+    ocrWords = raw.map(w => ({ text: w.text, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1, conf: w.confidence }));
+    const low = ocrWords.filter(w => w.conf < 60).length;
+    $('ocrOut').textContent = ocrText || '(no text found)';
+    $('ocrOut').classList.remove('hidden');
+    $('pdfCard').classList.remove('hidden');
+    $('ocrStatus').textContent = 'OCR done: ' + ocrWords.length + ' words, ' + low + ' low-confidence. Check the text before exporting.';
+    $('pdfBtn').disabled = !ocrWords.length;
+  } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; }
+};
+
+// ---------- PDF export ----------
+$('pdfBtn').onclick = () => {
+  const a = $('afterCv');
+  const pdf = new jspdf.jsPDF({ unit: 'pt', format: [a.width * 0.5, a.height * 0.5] });
+  const pw = a.width * 0.5, ph = a.height * 0.5;
+  pdf.addImage(a.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pw, ph);
+  // invisible text layer at word positions (searchable/selectable)
+  pdf.setFontSize(8);
+  let placed = 0, invisibleOK = true;
+  for (const w of ocrWords) {
+    if (!w.text) continue;
+    const x = w.x0 * 0.5, y = w.y1 * 0.5;
+    try {
+      if (invisibleOK) pdf.text(w.text, x, y, { renderingMode: 'invisible' });
+      else pdf.text(w.text, x, y);
+      placed++;
+    } catch (e) { invisibleOK = false; }
+  }
+  if (!invisibleOK) {
+    // fallback honesty: visible OCR text on an appended page
+    pdf.addPage([pw, ph]); pdf.setFontSize(10);
+    pdf.text(pdf.splitTextToSize('OCR text (invisible layer unsupported in this jsPDF build - text appended instead):\n\n' + ocrText, pw - 40), 20, 30);
+  }
+  pdf.setProperties({ title: 'ScanMend corrected document', subject: 'Corrected scan with OCR text layer' });
+  pdf.save('scanmend-corrected.pdf');
+};
+</script>
+</body>
+</html>
