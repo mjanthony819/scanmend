@@ -123,8 +123,11 @@ let ocrWords = null, ocrText = null;
 
 async function boot() {
   try {
-    // tfjs graph model (Keras 3 layers JSON is not tfjs-compatible); ?v= busts Pages/browser cache on model updates
-    model = await tf.loadGraphModel('model/model.json?v=2');
+    // tfjs graph model (Keras 3 layers JSON is not tfjs-compatible); ?v= busts Pages/browser cache on model updates.
+    // CPU backend: tfjs 4.22's WebGL backend silently returns input-independent output for this graph
+    // (verified against Python - CPU matches Python outputs to 4 decimals). Model is tiny; CPU is fast enough.
+    await tf.setBackend('cpu'); await tf.ready();
+    model = await tf.loadGraphModel('model/model.json?v=3');
     status('Ready. Load a document image to start.');
   } catch (e) {
     status('Model failed to load: ' + e.message);
@@ -180,11 +183,9 @@ async function setOriginal(bmp, name) {
 async function diagnose() {
   const thumb = document.createElement('canvas'); thumb.width = 160; thumb.height = 160;
   const c = thumb.getContext('2d');
-  // letterbox to square, grayscale, /255 - matches training preprocessing
-  const s = Math.min(160 / orig.width, 160 / orig.height);
-  const w = Math.round(orig.width * s), h = Math.round(orig.height * s);
+  // squash to 160x160, grayscale, /255 - matches synthesize.py training preprocessing (direct resize, no letterbox)
   c.fillStyle = '#fff'; c.fillRect(0, 0, 160, 160);
-  c.drawImage(orig, (160 - w) / 2, (160 - h) / 2, w, h);
+  c.drawImage(orig, 0, 0, 160, 160);
   const im = c.getImageData(0, 0, 160, 160), d = im.data;
   const t = tf.tidy(() => {
     const arr = new Float32Array(160 * 160);
@@ -218,7 +219,9 @@ function drawBefore() {
 }
 
 function resetSliders() {
-  $('sSkew').value = -window._est.skew;  // rotate opposite of detected skew
+  // skew estimate is NOT auto-applied: it failed validation on a real-style photo (estimated -2.7 deg
+  // for +1.8 deg actual). It is shown in the diagnosis card; deskew stays manual until validated.
+  $('sSkew').value = 0;
   $('sBlur').value = window._est.blur;
   $('sCon').value = window._est.con;
   $('sNoi').value = 0;  // noise head is near-chance on thumbnails: never auto-apply denoise
