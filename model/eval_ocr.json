@@ -1,0 +1,17 @@
+{
+  "degraded": {
+    "mean_wer": 0.5051184540225309,
+    "median_wer": 0.18895299507890717
+  },
+  "model": {
+    "mean_wer": 0.41162825748669973,
+    "median_wer": 0.11767068273092368
+  },
+  "baseline": {
+    "mean_wer": 0.5494313626336719,
+    "median_wer": 0.2242071735216729
+  },
+  "n": 40,
+  "model_worse_than_degraded": 0.2,
+  "model_better_than_baseline": 0.5
+}
