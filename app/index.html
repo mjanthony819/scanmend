@@ -97,6 +97,7 @@
       <span id="ocrStatus" style="color:var(--dim);font-size:12px"></span>
     </div>
     <div id="ocrCmp" style="color:var(--dim);font-size:12px;margin-top:6px"></div>
+    <div id="ocrSkipped" style="color:var(--dim);font-size:12px;margin-top:6px"></div>
     <div id="ocrOut" class="hidden" style="margin-top:10px"></div>
   </section>
 
@@ -280,7 +281,7 @@ function applyCorrections() {
   for (let i = 0; i < n; i++) { const v = g[i]; d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
   a.width = rot.width; a.height = rot.height;
   a.getContext('2d').putImageData(im, 0, 0);
-  ocrWords = ocrText = null; ocrRuns = {}; $('pdfBtn').disabled = true; $('ocrCmp').textContent = '';
+  ocrWords = ocrText = null; ocrRuns = {}; $('pdfBtn').disabled = true; $('ocrCmp').textContent = ''; if ($('ocrSkipped')) $('ocrSkipped').textContent = '';
   if (!$('ocrCard').classList.contains('hidden')) $('ocrStatus').textContent = 'Corrections changed - re-run OCR before exporting.';
 }
 
@@ -329,14 +330,46 @@ function syncOCRChoice() {
   let cmp = '';
   if (c) cmp += 'corrected: ' + c.words.length + ' words, mean conf ' + c.meanConf.toFixed(0) + '%  |  ';
   if (o) cmp += 'original: ' + o.words.length + ' words, mean conf ' + o.meanConf.toFixed(0) + '%  |  ';
-  cmp += 'exporting: ' + ocrSource + (c && o ? ' (higher mean confidence; run the other to compare)' : '');
-  $('ocrCmp').textContent = cmp;
+  cmp += 'exporting: ' + ocrSource;
+  if (c && o) {
+    cmp += ' (heuristic default: higher mean confidence - not a guarantee of fewer word errors). ';
+    const other = ocrSource === 'original' ? 'corrected' : 'original';
+    cmp += '<a href="#" style="color:var(--lime)" onclick="setOCRSource(\'' + other + '\');return false">export ' + other + ' instead</a>';
+  }
+  $('ocrCmp').innerHTML = cmp;
+  // reviewable skipped words: everything the export filter would omit, with reasons and a retain option
+  const sk = $('ocrSkipped');
+  if (r) {
+    const a = ocrSource === 'original' ? $('beforeCv') : $('afterCv');
+    const skipped = r.words.map(w => ({ w, reason: skipReason(w, a) })).filter(x => x.reason);
+    if (skipped.length) {
+      let h = skipped.length + ' of ' + r.words.length + ' OCR words will be omitted from the PDF (out-of-page boxes are always omitted). ' +
+        '<label style="color:var(--lime);cursor:pointer"><input type="checkbox" id="keepSkipped"> include the omitted words anyway</label>' +
+        '<details style="margin-top:4px"><summary>review omitted words</summary><div style="max-height:140px;overflow:auto;margin-top:4px">';
+      h += skipped.map(x => '<div>' + escapeHtml(x.w.text) + ' <span style="opacity:.7">(conf ' + x.w.conf.toFixed(0) + ', ' + x.reason + ')</span></div>').join('');
+      sk.innerHTML = h + '</div></details>';
+    } else sk.textContent = 'No OCR words will be omitted from the PDF.';
+  } else sk.textContent = '';
   $('ocrStatus').textContent = r ? 'OCR on ' + ocrSource + ': ' + r.words.length + ' words, ' + r.words.filter(w => w.conf < 60).length + ' low-confidence. Check the text before exporting.' : '';
 }
+function setOCRSource(which) { if (ocrRuns[which]) { ocrSource = which; syncOCRChoice(); } }
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch])); }
 $('ocrBtn').onclick = async () => { try { await runOCR('corrected'); } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; } };
 $('ocrOrigBtn').onclick = async () => { try { await runOCR('original'); } catch (e) { $('ocrStatus').textContent = 'OCR failed: ' + e.message; } };
 
 // ---------- PDF export ----------
+// Why the export would omit a word (null = it will be exported). Out-of-page is checked
+// separately in the export loop and is never bypassed; these reasons are the reviewable ones.
+function skipReason(w, canvas) {
+  const t = (w.text || '').trim();
+  if (!t) return 'empty';
+  if (w.conf < 50) return 'low confidence';
+  // shape-based garbage filter: background texture OCR yields lone punctuation and tiny
+  // single-char fragments even at moderate confidence - they are not document text.
+  if (!/[a-zA-Z0-9]/.test(t)) return 'no letters/digits';
+  if (t.length === 1 && !/[aAI0-9]/.test(t)) return 'single-character fragment';
+  return null;
+}
 // Reading-order sort: cluster words into lines by y-center, lines top-down, words left-right.
 function readingOrder(words) {
   const hs = words.map(w => w.y1 - w.y0).sort((a, b) => a - b);
@@ -361,16 +394,12 @@ $('pdfBtn').onclick = () => {
   // invisible text layer at word positions (searchable/selectable), in reading order.
   // baseline:'top' + per-word font size so the invisible box overlays the visible word.
   // Skip out-of-page boxes and very-low-confidence background fragments; skips are counted and shown, never silent.
+  const keepSkipped = $('keepSkipped') && $('keepSkipped').checked;
   let placed = 0, skippedConf = 0, skippedBounds = 0, invisibleOK = true;
   for (const w of readingOrder(ocrWords)) {
     if (!w.text || !w.text.trim()) continue;
     if (w.x0 < 0 || w.y0 < 0 || w.x1 > a.width || w.y1 > a.height) { skippedBounds++; continue; }
-    if (w.conf < 50) { skippedConf++; continue; }
-    // shape-based garbage filter: background texture OCR yields lone punctuation and tiny
-    // single-char fragments even at moderate confidence - they are not document text.
-    const t = w.text.trim();
-    if (!/[a-zA-Z0-9]/.test(t)) { skippedConf++; continue; }
-    if (t.length === 1 && !/[aAI0-9]/.test(t)) { skippedConf++; continue; }
+    if (!keepSkipped && skipReason(w, a)) { skippedConf++; continue; }
     const x = w.x0 * 0.5, y = w.y0 * 0.5;
     const fs = Math.max(4, (w.y1 - w.y0) * 0.5 * 0.95);
     try {
@@ -388,8 +417,8 @@ $('pdfBtn').onclick = () => {
   pdf.setProperties({ title: 'ScanMend ' + ocrSource + ' document', subject: 'Scan with OCR text layer' });
   pdf.save('scanmend-' + ocrSource + '.pdf');
   $('ocrStatus').textContent = 'Exported ' + placed + ' of ' + ocrWords.length + ' OCR words' +
-    (skippedConf ? ' (' + skippedConf + ' low-confidence fragments skipped)' : '') +
-    (skippedBounds ? ' (' + skippedBounds + ' out-of-page boxes skipped)' : '') + '. Source: ' + ocrSource + '.';
+    (skippedConf ? ' (' + skippedConf + ' omitted by filter' + (keepSkipped ? ' - retained on review' : ' - reviewable above') + ')' : '') +
+    (skippedBounds ? ' (' + skippedBounds + ' out-of-page boxes always omitted)' : '') + '. Source: ' + ocrSource + '.';
 };
 </script>
 </body>
