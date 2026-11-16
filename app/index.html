@@ -366,6 +366,11 @@ $('pdfBtn').onclick = () => {
     if (!w.text || !w.text.trim()) continue;
     if (w.x0 < 0 || w.y0 < 0 || w.x1 > a.width || w.y1 > a.height) { skippedBounds++; continue; }
     if (w.conf < 50) { skippedConf++; continue; }
+    // shape-based garbage filter: background texture OCR yields lone punctuation and tiny
+    // single-char fragments even at moderate confidence - they are not document text.
+    const t = w.text.trim();
+    if (!/[a-zA-Z0-9]/.test(t)) { skippedConf++; continue; }
+    if (t.length === 1 && !/[aAI0-9]/.test(t)) { skippedConf++; continue; }
     const x = w.x0 * 0.5, y = w.y0 * 0.5;
     const fs = Math.max(4, (w.y1 - w.y0) * 0.5 * 0.95);
     try {
